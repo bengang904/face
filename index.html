@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>人脸识别 SQL 存储系统 V10 PRO</title>
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.6.2/sql-wasm.js"></script>
+    <style>
+        :root { --p: #00f2fe; --g: #00ff41; --b: #000; --w: #1a1a1a; --r: #ff4444; }
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        body { background: var(--b); color: #888; font-family: -apple-system, sans-serif; margin: 0; padding: 10px; display: flex; flex-direction: column; align-items: center; height: 100vh; overflow: hidden; }
+        .app-node { width: 100%; max-width: 480px; background: #050505; border: 1px solid #111; padding: 15px; border-radius: 8px; position: relative; }
+        .header { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 5px; color: var(--p); font-weight: bold; text-transform: uppercase; letter-spacing: 1px; align-items: center; }
+        .track { height: 2px; background: #111; width: 100%; margin-bottom: 15px; }
+        #fill { height: 100%; background: var(--p); width: 0%; transition: 0.3s; box-shadow: 0 0 10px var(--p); }
+        .view-port { position: relative; width: 100%; aspect-ratio: 1; background: #000; border: 1px solid #151515; margin-bottom: 12px; overflow: hidden; border-radius: 4px; }
+        video, canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; }
+        #reg-ui { display: none; background: #080808; border: 1px solid #151515; padding: 12px; margin-bottom: 12px; grid-template-columns: 1fr 1fr; gap: 8px; border-radius: 4px; }
+        input, select { background: #000; border: 1px solid #222; color: #fff; padding: 12px; font-size: 14px; width: 100%; outline: none; border-radius: 4px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .btn { background: #000; border: 1px solid #222; color: #aaa; padding: 16px; font-size: 13px; cursor: pointer; border-radius: 4px; font-weight: bold; text-align: center; transition: 0.2s; }
+        .btn:active:not(:disabled) { background: #111; border-color: var(--p); color: #fff; }
+        .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        .btn-g { border-color: var(--g); color: var(--g); }
+        #log { margin-top: 12px; font-size: 12px; background: #020202; padding: 12px; border: 1px solid #111; min-height: 60px; color: #777; line-height: 1.6; border-radius: 4px; white-space: pre-wrap; }
+        input[type="file"] { display: none; }
+        .cam-switch { display: none; align-items: center; gap: 8px; font-size: 10px; color: #555; cursor: pointer; }
+        @media (pointer: coarse) { .cam-switch { display: flex; } }
+        .tgl { position: relative; width: 34px; height: 18px; background: #111; border-radius: 10px; border: 1px solid #222; transition: 0.3s; }
+        .tgl::after { content: ''; position: absolute; width: 12px; height: 12px; background: var(--p); border-radius: 50%; top: 2px; left: 2px; transition: 0.3s; box-shadow: 0 0 5px var(--p); }
+        .tgl.on::after { left: 18px; background: var(--g); box-shadow: 0 0 5px var(--g); }
+    </style>
+</head>
+<body>
+
+<div class="app-node">
+    <div class="header">
+        <span id="msg">内核引导中...</span>
+        <div class="cam-switch" id="cam-toggle">
+            <span>前置</span>
+            <div class="tgl" id="tgl-ui"></div>
+            <span>后置</span>
+        </div>
+        <span id="pct">0%</span>
+    </div>
+    <div class="track"><div id="fill"></div></div>
+
+    <div class="view-port">
+        <video id="v" autoplay muted playsinline></video>
+        <canvas id="c"></canvas>
+    </div>
+
+    <div id="reg-ui">
+        <input type="text" id="fn" placeholder="姓名">
+        <select id="fg"><option value="男">男</option><option value="女">女</option></select>
+        <input type="date" id="fb" style="grid-column: span 2;">
+        <button class="btn btn-g" id="c-reg" style="grid-column: span 2;">写入生物识别数据库</button>
+    </div>
+
+    <div class="grid">
+        <button class="btn" id="p-reg" disabled>特征提取</button>
+        <label class="btn">载入数据库<input type="file" id="db-u" accept=".db"></label>
+        <button class="btn" id="db-s" disabled>导出数据库</button>
+        <button class="btn btn-g" id="auth" disabled>身份核验模式</button>
+    </div>
+
+    <div id="log">等待内核初始化...</div>
+</div>
+
+<script>
+    let _db = null, _SQL = null, _tmp = null, _isAuth = false, _facing = 'user';
+    const v = document.getElementById('v'), c = document.getElementById('c'), lo = document.getElementById('log');
+    const f = document.getElementById('fill'), p = document.getElementById('pct'), m = document.getElementById('msg');
+    const ui = document.getElementById('reg-ui');
+    const tgl = document.getElementById('tgl-ui');
+
+    async function startStream() {
+        if (v.srcObject) v.srcObject.getTracks().forEach(t => t.stop());
+        const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: _facing, width: 640, height: 640 } });
+        v.srcObject = s;
+    }
+
+    async function setup() {
+        try {
+            const URL = 'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights';
+            uiS(30, "加载 SQL 内核");
+            _SQL = await initSqlJs({ locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.6.2/${f}` });
+            uiS(70, "解析神经网络");
+            await Promise.all([
+                faceapi.nets.tinyFaceDetector.loadFromUri(URL),
+                faceapi.nets.faceLandmark68Net.loadFromUri(URL),
+                faceapi.nets.faceRecognitionNet.loadFromUri(URL)
+            ]);
+            await startStream();
+            uiS(100, "运行中");
+            document.querySelectorAll('.btn').forEach(b => b.disabled = false);
+            const params = new URLSearchParams(window.location.search);
+            const remoteDB = params.get('db');
+            if (remoteDB) {
+                lo.innerText = "正在同步远程数据库...";
+                fetch(remoteDB).then(r => r.arrayBuffer()).then(buf => {
+                    _db = new _SQL.Database(new Uint8Array(buf));
+                    lo.innerText = "远程数据库挂载成功。";
+                }).catch(e => lo.innerText = "远程挂载失败: " + e);
+            } else {
+                lo.innerText = "系统就绪。请录入或挂载数据库。";
+            }
+            requestAnimationFrame(tick);
+        } catch (e) { lo.innerText = "异常终止: " + e; }
+    }
+
+    document.getElementById('cam-toggle').onclick = async () => {
+        _facing = _facing === 'user' ? 'environment' : 'user';
+        tgl.classList.toggle('on');
+        await startStream();
+    };
+
+    function uiS(v, s) {
+        f.style.width = v + "%";
+        p.innerText = v + "%";
+        m.innerText = s;
+    }
+
+    function drawStatic(ctx, w, h) {
+        const time = Date.now() * 0.0015;
+        const scanY = ((Math.sin(time) + 1) / 2) * h;
+        ctx.strokeStyle = 'rgba(0, 242, 254, 0.4)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, scanY);
+        ctx.lineTo(w, scanY);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(0, 242, 254, 0.05)';
+        ctx.fillRect(0, scanY - 20, w, 20);
+    }
+
+    function drawBox(ctx, box) {
+        const { x, y, width: w, height: h } = box;
+        const s = 15;
+        ctx.strokeStyle = _isAuth ? '#00ff41' : '#00f2fe';
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(x, y+s); ctx.lineTo(x, y); ctx.lineTo(x+s, y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x+w-s, y); ctx.lineTo(x+w, y); ctx.lineTo(x+w, y+s); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x, y+h-s); ctx.lineTo(x, y+h); ctx.lineTo(x+s, y+h); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x+w-s, y+h); ctx.lineTo(x+w, y+h); ctx.lineTo(x+w, y+h-s); ctx.stroke();
+    }
+
+    async function tick() {
+        if (v.videoWidth > 0) {
+            if (c.width !== v.videoWidth) {
+                c.width = v.videoWidth;
+                c.height = v.videoHeight;
+            }
+            const ctx = c.getContext('2d');
+            const det = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks();
+            ctx.clearRect(0, 0, c.width, c.height);
+            drawStatic(ctx, c.width, c.height);
+            if (det) {
+                const res = faceapi.resizeResults(det, { width: c.width, height: c.height });
+                faceapi.draw.drawFaceLandmarks(c, res);
+                drawBox(ctx, res.detection.box);
+                if (_isAuth) await performSearch(det);
+            }
+        }
+        requestAnimationFrame(tick);
+    }
+
+    async function performSearch(det) {
+        if (!_db) return;
+        const fullDet = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+        if (!fullDet) return;
+        const data = _db.exec("SELECT name, gender, birth, descriptor FROM users");
+        if (!data.length || !data[0].values.length) return;
+        let best = { d: 1, i: null };
+        data[0].values.forEach(r => {
+            const dist = faceapi.euclideanDistance(fullDet.descriptor, new Float32Array(JSON.parse(r[3])));
+            if (dist < best.d) best = { d: dist, i: r };
+        });
+        if (best.d < 0.45) {
+            lo.innerText = `验证通过\n姓名：${best.i[0]}\n性别：${best.i[1]}\n生日：${best.i[2]}\n置信度：${(1 - best.d).toFixed(4)}`;
+            lo.style.color = "var(--g)";
+        } else {
+            lo.innerText = "状态：未知目标\n正在扫描...";
+            lo.style.color = "var(--r)";
+        }
+    }
+
+    document.getElementById('db-u').onchange = (e) => {
+        const fr = new FileReader();
+        fr.onload = function() {
+            _db = new _SQL.Database(new Uint8Array(this.result));
+            lo.innerText = "本地数据库已载入。";
+        };
+        fr.readAsArrayBuffer(e.target.files[0]);
+    };
+
+    document.getElementById('p-reg').onclick = async () => {
+        _isAuth = false;
+        const res = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+        if (res) {
+            _tmp = res.descriptor;
+            ui.style.display = 'grid';
+            lo.innerText = "特征点捕获成功。";
+        }
+    };
+
+    document.getElementById('c-reg').onclick = () => {
+        if (!_db) {
+            _db = new _SQL.Database();
+            _db.run("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, gender TEXT, birth TEXT, descriptor TEXT);");
+        }
+        const n = document.getElementById('fn').value, g = document.getElementById('fg').value, b = document.getElementById('fb').value;
+        if (!n || !b || !_tmp) return alert("信息不完整");
+        _db.run("INSERT INTO users (name, gender, birth, descriptor) VALUES (?, ?, ?, ?)", [n, g, b, JSON.stringify(Array.from(_tmp))]);
+        lo.innerText = "已录入：" + n;
+        ui.style.display = 'none';
+    };
+
+    document.getElementById('db-s').onclick = () => {
+        if (!_db) return;
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([_db.export()], {type: "application/octet-stream"}));
+        a.download = `FACE_DATA.db`;
+        a.click();
+    };
+
+    document.getElementById('auth').onclick = () => {
+        if (!_db) return alert("请先挂载数据库");
+        _isAuth = !_isAuth;
+        document.getElementById('auth').innerText = _isAuth ? "停止检索" : "身份核验模式";
+        lo.innerText = _isAuth ? "检索模式：已激活" : "系统就绪";
+        lo.style.color = _isAuth ? "var(--g)" : "#777";
+    };
+
+    setup();
+</script>
+</body>
+</html>
