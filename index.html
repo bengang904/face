@@ -142,7 +142,7 @@
             const ds = { width: v.offsetWidth, height: v.offsetHeight };
             if (c.width !== ds.width) { c.width = ds.width; c.height = ds.height; }
             const ctx = c.getContext('2d');
-            const det = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.5 })).withFaceLandmarks();
+            const det = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({ inputSize: 256, scoreThreshold: 0.5 })).withFaceLandmarks();
             ctx.clearRect(0, 0, c.width, c.height);
             drawStatic(ctx, c.width, c.height);
             if (det) {
@@ -157,7 +157,7 @@
 
     async function performSearch(det) {
         if (!_db) return;
-        const fullDet = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({ inputSize: 160 })).withFaceLandmarks().withFaceDescriptor();
+        const fullDet = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({ inputSize: 256 })).withFaceLandmarks().withFaceDescriptor();
         if (!fullDet) return;
         const data = _db.exec("SELECT name, gender, birth, descriptor FROM users");
         if (!data.length || !data[0].values.length) return;
@@ -166,7 +166,7 @@
             const dist = faceapi.euclideanDistance(fullDet.descriptor, new Float32Array(JSON.parse(r[3])));
             if (dist < best.d) best = { d: dist, i: r };
         });
-        if (best.d < 0.48) {
+        if (best.d < 0.42) {
             lo.innerText = `核验结果: 匹配成功\n姓名: ${best.i[0]}\n性别: ${best.i[1]}\n生日: ${best.i[2]}\n置信度: ${(1 - best.d).toFixed(4)}`;
             lo.style.color = "var(--g)";
         } else {
@@ -191,16 +191,40 @@
 
     document.getElementById('p-reg').onclick = async () => {
         _isAuth = false;
-        lo.innerText = "正在分析面部特征...";
-        const res = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.4 })).withFaceLandmarks().withFaceDescriptor();
-        if (res) {
-            _tmp = res.descriptor;
+        document.getElementById('p-reg').disabled = true;
+        let samples = [];
+        const count = 8;
+        lo.innerText = `正在启动高精度采样 (0/${count})...`;
+        
+        for (let i = 0; i < 20 && samples.length < count; i++) {
+            const res = await faceapi.detectSingleFace(v, new faceapi.TinyFaceDetectorOptions({ inputSize: 256, scoreThreshold: 0.5 })).withFaceLandmarks().withFaceDescriptor();
+            if (res) {
+                samples.push(res.descriptor);
+                lo.innerText = `采样中: ${samples.length}/${count}...`;
+                uiS(Math.floor((samples.length / count) * 100), "特征重构");
+            }
+            await new Promise(r => setTimeout(r, 100));
+        }
+
+        if (samples.length === count) {
+            const dims = samples[0].length;
+            const avg = new Float32Array(dims);
+            for (let i = 0; i < dims; i++) {
+                let sum = 0;
+                for (let j = 0; j < count; j++) sum += samples[j][i];
+                avg[i] = sum / count;
+            }
+            _tmp = avg;
             ui.style.display = 'grid';
-            lo.innerText = "特征提取成功，请输入身份信息";
+            lo.innerText = "均值化特征提取成功";
+            lo.style.color = "var(--p)";
             window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
         } else {
-            lo.innerText = "面部检测失败，请保持光线充足";
+            lo.innerText = "环境不稳定，采样失败";
+            lo.style.color = "var(--r)";
         }
+        document.getElementById('p-reg').disabled = false;
+        uiS(100, "就绪");
     };
 
     document.getElementById('c-reg').onclick = () => {
